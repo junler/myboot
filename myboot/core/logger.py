@@ -7,32 +7,38 @@
 
 import logging
 import sys
-from typing import Optional
+from typing import Optional, Union
 
 from loguru import logger as loguru_logger
+from dynaconf import Dynaconf
 
 from .config import get_settings
 
 logger = loguru_logger
 
 
-def setup_logging(config_file: Optional[str] = None) -> None:
+def setup_logging(config: Optional[Union[str, Dynaconf]] = None) -> None:
     """
-    根据配置文件初始化 loguru 日志系统
+    根据配置文件或配置对象初始化 loguru 日志系统
     
     Args:
-        config_file: 配置文件路径，如果为 None 则使用默认配置
+        config: 配置文件路径或配置对象（Dynaconf），如果为 None 则使用默认配置
     """
-    config = get_settings(config_file)
+    if isinstance(config, Dynaconf):
+        # 如果传入的是配置对象，直接使用
+        config_obj = config
+    else:
+        # 如果传入的是配置文件路径或 None，则获取配置对象
+        config_obj = get_settings(config)
     
     # 移除默认的 handler
     loguru_logger.remove()
     
     # 获取日志级别和格式
-    log_level = config.get("logging.level", "INFO").upper()
+    log_level = config_obj.get("logging.level", "INFO").upper()
     
     # 检查是否使用 JSON 格式
-    use_json = config.get("logging.json", False)
+    use_json = config_obj.get("logging.json", False)
     if isinstance(use_json, str):
         use_json = use_json.lower() in ("true", "1", "yes", "on")
     
@@ -57,7 +63,7 @@ def setup_logging(config_file: Optional[str] = None) -> None:
         }
     else:
         # 获取日志格式，如果是标准 logging 格式则转换为 loguru 格式
-        user_format = config.get("logging.format", None)
+        user_format = config_obj.get("logging.format", None)
         if user_format:
             # 如果用户使用的是标准 logging 格式，尝试转换
             # 简单的格式转换（常见格式）
@@ -102,7 +108,7 @@ def setup_logging(config_file: Optional[str] = None) -> None:
     loguru_logger.add(**console_kwargs)
     
     # 如果有文件日志配置，添加文件 handler
-    log_file = config.get("logging.file")
+    log_file = config_obj.get("logging.file")
     if log_file:
         import os
         os.makedirs(os.path.dirname(log_file) if os.path.dirname(log_file) else ".", exist_ok=True)
@@ -110,10 +116,10 @@ def setup_logging(config_file: Optional[str] = None) -> None:
     
     # 配置第三方库的日志级别（仅设置标准 logging 的级别，不拦截转发）
     try:
-        third_party_config = config.logging.third_party
+        third_party_config = config_obj.logging.third_party
     except (AttributeError, KeyError):
         try:
-            third_party_config = config.get("logging.third_party", {})
+            third_party_config = config_obj.get("logging.third_party", {})
         except (AttributeError, KeyError):
             third_party_config = {}
     

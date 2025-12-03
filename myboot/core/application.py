@@ -55,14 +55,17 @@ class Application:
         self.name = name
         self.config = get_settings(config_file)
 
+        # 应用配置
+        self._apply_config(kwargs)
+
         # 获取应用版本号（从配置文件读取，默认 0.0.1）
         self.version = self.config.get("app.version", "0.0.1")
 
         # 初始化 loguru 日志系统（包括第三方库日志级别配置）
-        setup_logging(config_file)
+        setup_logging(self.config)
 
         self.logger = logger.bind(name=self.name)
-        self.scheduler = Scheduler(config_file=config_file)
+        self.scheduler = Scheduler(config=self.config)
 
         # 中间件列表
         self.middlewares: List[Middleware] = []
@@ -91,9 +94,6 @@ class Application:
 
         # 注册信号处理器
         self._register_signal_handlers()
-
-        # 应用配置
-        self._apply_config(kwargs)
 
         # 创建 FastAPI 应用
         self._fastapi_app = self._create_fastapi_app()

@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import importlib
 import inspect
 from pathlib import Path
@@ -14,6 +15,24 @@ from functools import wraps
 from loguru import logger as loguru_logger
 
 logger = loguru_logger.bind(name=__name__)
+
+
+def _camel_to_snake(name: str) -> str:
+    """
+    将驼峰命名转换为下划线分隔的小写形式
+    
+    Args:
+        name: 类名（驼峰命名）
+    
+    Returns:
+        下划线分隔的小写字符串
+    """
+    # 在大写字母前插入下划线（除了第一个字符）
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    # 处理连续大写字母的情况（如 HTTPClient）
+    s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1)
+    # 转换为小写
+    return s2.lower()
 
 
 def _find_project_root() -> str:
@@ -119,6 +138,19 @@ class AutoConfigurationManager:
     
     def _check_class(self, cls: Type, module_name: str) -> None:
         """检查类是否是装饰的组件"""
+        # 检查类中的方法是否有任务装饰器
+        for name, method in inspect.getmembers(cls, predicate=inspect.isfunction):
+            if hasattr(method, '__myboot_job__'):
+                # 发现类方法中的任务
+                self.discovered_components['jobs'].append({
+                    'class': cls,
+                    'method': method,
+                    'method_name': name,
+                    'module': module_name,
+                    'type': 'class_method_job'
+                })
+        
+        # 检查类本身的装饰器
         if hasattr(cls, '__myboot_rest_controller__'):
             self.discovered_components['rest_controllers'].append({
                 'class': cls,
@@ -159,13 +191,14 @@ class AutoConfigurationManager:
         logger.debug("开始应用自动配置...")
         
         # 自动注册各种组件
+        # 注意：服务注册需要在任务注册之前，以便任务可以使用依赖注入的服务
         self._auto_register_rest_controllers(app)
         self._auto_register_routes(app)
-        self._auto_register_jobs(app)
-        self._auto_register_middleware(app)
-        self._auto_register_services(app)
+        self._auto_register_services(app)  # 先注册服务，支持依赖注入
         self._auto_register_models(app)
         self._auto_register_clients(app)
+        self._auto_register_jobs(app)  # 再注册任务，可以使用已注册的服务
+        self._auto_register_middleware(app)
         
         logger.debug("自动配置应用完成")
     
@@ -259,12 +292,12 @@ class AutoConfigurationManager:
             except Exception as e:
                 logger.error(f"自动注册路由失败 {route_info['module']}: {e}")
     
-    def _is_job_enabled(self, func, job_config: dict) -> bool:
+    def _is_job_enabled(self, _func, job_config: dict) -> bool:
         """
         检查任务是否启用
         
         Args:
-            func: 任务函数
+            _func: 任务函数（保留用于未来扩展，如从函数名读取配置）
             job_config: 任务配置
             
         Returns:
@@ -283,41 +316,127 @@ class AutoConfigurationManager:
         # 默认启用
         return True
 
+    def _get_class_instance(self, cls: Type, app) -> Any:
+        """
+        获取类实例，支持依赖注入
+        
+        如果类有 @service 装饰器，尝试从 DI 容器或 app.services 获取实例
+        否则直接实例化
+        
+        Args:
+            cls: 类
+            app: 应用实例
+            
+        Returns:
+            类实例
+        """
+        # 检查类是否有 @service 装饰器
+        if hasattr(cls, '__myboot_service__'):
+            service_config = getattr(cls, '__myboot_service__')
+            service_name = service_config.get('name', _camel_to_snake(cls.__name__))
+            
+            # 方法1: 尝试从 DI 容器获取（如果容器已构建）
+            if hasattr(app, 'di_container'):
+                di_container = app.di_container
+                try:
+                    if di_container.has_service(service_name):
+                        instance = di_container.get_service(service_name)
+                        logger.debug(f"从 DI 容器获取服务实例: {service_name}")
+                        return instance
+                except Exception as e:
+                    logger.debug(f"从 DI 容器获取服务失败 {service_name}: {e}")
+            
+            # 方法2: 尝试从 app.services 获取（服务注册后会在那里）
+            if hasattr(app, 'services') and service_name in app.services:
+                instance = app.services[service_name]
+                logger.debug(f"从 app.services 获取服务实例: {service_name}")
+                return instance
+            
+            # 方法3: 如果都失败，尝试直接实例化（可能会有依赖注入问题）
+            logger.warning(f"服务 '{service_name}' 未在容器中注册，尝试直接实例化（可能缺少依赖注入）")
+        
+        # 没有 @service 装饰器或获取失败，直接实例化
+        return cls()
+    
     def _auto_register_jobs(self, app) -> None:
         """自动注册任务"""
         for job_info in self.discovered_components['jobs']:
             try:
-                func = job_info['function']
-                job_config = getattr(func, '__myboot_job__')
+                # 处理类方法任务
+                if job_info['type'] == 'class_method_job':
+                    cls = job_info['class']
+                    method = job_info['method']
+                    method_name = job_info['method_name']
+                    job_config = getattr(method, '__myboot_job__')
+                    
+                    # 检查任务是否启用
+                    if not self._is_job_enabled(method, job_config):
+                        logger.info(f"任务已禁用，跳过注册: {cls.__name__}.{method_name} ({job_info['module']})")
+                        continue
+                    
+                    # 创建类实例并绑定方法（支持依赖注入）
+                    try:
+                        instance = self._get_class_instance(cls, app)
+                        bound_method = getattr(instance, method_name)
+                    except Exception as e:
+                        logger.error(f"创建类实例失败 {cls.__name__}: {e}", exc_info=True)
+                        continue
+                    
+                    # 注册绑定的方法
+                    if job_config['type'] == 'cron':
+                        app.scheduler.add_cron_job(
+                            func=bound_method,
+                            cron=job_config['cron'],
+                            **job_config.get('kwargs', {})
+                        )
+                    elif job_config['type'] == 'interval':
+                        app.scheduler.add_interval_job(
+                            func=bound_method,
+                            interval=job_config['interval'],
+                            **job_config.get('kwargs', {})
+                        )
+                    elif job_config['type'] == 'once':
+                        app.scheduler.add_date_job(
+                            func=bound_method,
+                            run_date=job_config['run_date'],
+                            **job_config.get('kwargs', {})
+                        )
+                    
+                    logger.info(f"自动注册任务（类方法）: {cls.__name__}.{method_name} ({job_info['module']})")
                 
-                # 检查任务是否启用
-                if not self._is_job_enabled(func, job_config):
-                    logger.info(f"任务已禁用，跳过注册: {func.__name__} ({job_info['module']})")
-                    continue
-                
-                if job_config['type'] == 'cron':
-                    app.scheduler.add_cron_job(
-                        func=func,
-                        cron=job_config['cron'],
-                        **job_config.get('kwargs', {})
-                    )
-                elif job_config['type'] == 'interval':
-                    app.scheduler.add_interval_job(
-                        func=func,
-                        interval=job_config['interval'],
-                        **job_config.get('kwargs', {})
-                    )
-                elif job_config['type'] == 'once':
-                    # 一次性任务的处理
-                    app.scheduler.add_date_job(
-                        func=func,
-                        run_date=job_config['run_date'],
-                        **job_config.get('kwargs', {})
-                    )
-                
-                logger.info(f"自动注册任务: {func.__name__} ({job_info['module']})")
+                # 处理函数任务
+                elif job_info['type'] == 'function_job':
+                    func = job_info['function']
+                    job_config = getattr(func, '__myboot_job__')
+                    
+                    # 检查任务是否启用
+                    if not self._is_job_enabled(func, job_config):
+                        logger.info(f"任务已禁用，跳过注册: {func.__name__} ({job_info['module']})")
+                        continue
+                    
+                    if job_config['type'] == 'cron':
+                        app.scheduler.add_cron_job(
+                            func=func,
+                            cron=job_config['cron'],
+                            **job_config.get('kwargs', {})
+                        )
+                    elif job_config['type'] == 'interval':
+                        app.scheduler.add_interval_job(
+                            func=func,
+                            interval=job_config['interval'],
+                            **job_config.get('kwargs', {})
+                        )
+                    elif job_config['type'] == 'once':
+                        # 一次性任务的处理
+                        app.scheduler.add_date_job(
+                            func=func,
+                            run_date=job_config['run_date'],
+                            **job_config.get('kwargs', {})
+                        )
+                    
+                    logger.info(f"自动注册任务: {func.__name__} ({job_info['module']})")
             except Exception as e:
-                logger.error(f"自动注册任务失败 {job_info['module']}: {e}")
+                logger.error(f"自动注册任务失败 {job_info.get('module', 'unknown')}: {e}", exc_info=True)
     
     def _auto_register_middleware(self, app) -> None:
         """自动注册中间件"""

@@ -84,8 +84,14 @@ def cron(cron_expression: str, enabled: Optional[bool] = None, **kwargs):
     """
     Cron 任务装饰器
     
+    支持在函数和类方法中使用：
+    - 函数：@cron("0 0 * * *") 或 @cron("0 0 * * * *")
+    - 类方法：在类的方法上使用 @cron("0 0 * * *")
+    
     Args:
         cron_expression: Cron 表达式
+            - 标准5位格式：分 时 日 月 周（如 "0 0 * * *" 表示每小时）
+            - 6位格式：秒 分 时 日 月 周（如 "0 0 * * * *" 表示每小时，兼容旧格式）
         enabled: 是否启用任务，如果为 None 则默认启用
                  可以通过手动获取配置来传递，例如：
                  from myboot.core.config import get_config
@@ -106,6 +112,10 @@ def cron(cron_expression: str, enabled: Optional[bool] = None, **kwargs):
 def interval(seconds: int = None, minutes: int = None, hours: int = None, enabled: Optional[bool] = None, **kwargs):
     """
     间隔任务装饰器
+    
+    支持在函数和类方法中使用：
+    - 函数：@interval(seconds=60)
+    - 类方法：在类的方法上使用 @interval(seconds=60)
     
     Args:
         seconds: 秒数
@@ -132,6 +142,10 @@ def interval(seconds: int = None, minutes: int = None, hours: int = None, enable
 def once(run_date: str = None, enabled: Optional[bool] = None, **kwargs):
     """
     一次性任务装饰器
+    
+    支持在函数和类方法中使用：
+    - 函数：@once('2025-12-31 23:59:59')
+    - 类方法：在类的方法上使用 @once('2025-12-31 23:59:59')
     
     Args:
         run_date: 运行日期

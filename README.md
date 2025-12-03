@@ -957,18 +957,13 @@ MyBoot 使用 [loguru](https://github.com/Delgan/loguru) 作为日志系统，�
 #### 基本使用
 
 ```python
-# 方式一：直接使用 loguru（推荐）
-from loguru import logger
+# 使用框架导出的 logger
+from myboot.core.logger import logger
 
 logger.info("应用启动")
 logger.error("发生错误")
 logger.debug("调试信息")
 logger.warning("警告信息")
-
-# 方式二：使用框架导出的 logger
-from myboot.core.logger import logger
-
-logger.info("应用启动")
 ```
 
 #### 日志配置
@@ -1047,7 +1042,7 @@ format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 #### 高级功能
 
 ```python
-from loguru import logger
+from myboot.core.logger import logger
 
 # 结构化日志
 logger.info("用户登录", user_id=123, username="admin")
@@ -1066,7 +1061,7 @@ with logger.contextualize(level="DEBUG"):
     logger.debug("这是调试信息")
 
 # 添加自定义 handler（保留用户自定义 loguru 的能力）
-from loguru import logger
+from myboot.core.logger import logger
 logger.add("custom.log", rotation="100 MB", retention="30 days")
 ```
 
@@ -1304,7 +1299,7 @@ class ReportController:
                     timeout=300  # 5分钟超时
                 )
                 self.report_type = report_type
-            
+
             def run(self, *args, **kwargs):
                 """生成报告任务"""
                 import time
@@ -1314,7 +1309,7 @@ class ReportController:
 
         # 创建任务实例
         job = ReportJob(report_type)
-        
+
         # 添加到调度器（用于状态跟踪，非定时任务）
         job_id = self.scheduler.add_job_object(job)
         thread = threading.Thread(target=job.execute)
@@ -1375,7 +1370,7 @@ class MyTask(ScheduledJob):
     def __init__(self, data: dict):
         super().__init__(name="my_task")
         self.data = data
-    
+
     def run(self, *args, **kwargs):
         """任务函数"""
         print(f"处理数据: {self.data}")
