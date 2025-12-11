@@ -22,6 +22,7 @@ class ServiceRegistry:
         self.dependencies: Dict[str, Set[str]] = {}  # service_name -> set of dependency names
         self.dependents: Dict[str, Set[str]] = {}  # service_name -> set of dependent names
         self._dependency_graph: Optional[Dict[str, Set[str]]] = None
+        self.known_instances: Set[str] = set()  # 已知的外部实例名称（如 Client）
     
     def register_service(self, service_class: Type, service_name: str, config: dict = None) -> None:
         """
@@ -77,9 +78,10 @@ class ServiceRegistry:
         
         self._dependency_graph = {}
         
-        # 验证所有依赖的服务都已注册
+        # 验证所有依赖的服务都已注册（排除已知的外部实例如 Client）
+        known_names = set(self.services.keys()) | self.known_instances
         for service_name, deps in self.dependencies.items():
-            missing_deps = deps - set(self.services.keys())
+            missing_deps = deps - known_names
             if missing_deps:
                 logger.warning(
                     f"服务 '{service_name}' 的依赖 '{missing_deps}' 未找到，"

@@ -6,6 +6,11 @@ MyBoot 框架提供了基于 `dependency_injector` 的自动依赖注入功能�
 
 - [快速开始](#快速开始)
 - [基本用法](#基本用法)
+  - [声明依赖](#1-声明依赖)
+  - [服务命名规则](#2-服务命名规则)
+  - [多级依赖](#3-多级依赖)
+  - [可选依赖](#4-可选依赖)
+  - [Client 依赖注入](#5-client-依赖注入)
 - [高级特性](#高级特性)
 - [最佳实践](#最佳实践)
 - [常见问题](#常见问题)
@@ -137,6 +142,87 @@ class ProductService:
         if self.cache_service:
             # 使用缓存服务
             pass
+```
+
+### 5. Client 依赖注入
+
+除了 Service 之间的依赖注入，框架还支持将 Client 注入到 Controller 或 Service 中：
+
+```python
+from myboot.core.decorators import client, service, rest_controller, get
+
+@client()
+class HttpClient:
+    """HTTP 客户端"""
+    def request(self, url: str):
+        return {"url": url}
+
+@client(name="redis_client")  # 自定义名称
+class RedisClient:
+    """Redis 客户端"""
+    def get(self, key: str):
+        return None
+
+@service()
+class UserService:
+    """注入 Client 到 Service"""
+    def __init__(self, http_client: HttpClient):
+        self.http_client = http_client
+
+@rest_controller("/api")
+class UserController:
+    """注入 Client 和 Service 到 Controller"""
+    def __init__(self, user_service: UserService, redis_client: RedisClient):
+        self.user_service = user_service
+        self.redis_client = redis_client
+
+    @get("/users")
+    def list_users(self):
+        return []
+```
+
+#### Client 命名规则
+
+- **默认命名**：类名自动转换为下划线形式
+
+  - `HttpClient` → `http_client`
+  - `RedisClient` → `redis_client`
+
+- **自定义命名**：通过装饰器参数指定
+  ```python
+  @client(name="my_redis")
+  class RedisClient:
+      pass
+  ```
+
+#### Client 查找方式
+
+框架支持多种方式查找 Client 依赖：
+
+```python
+@client(name="my_http")  # 自定义名称
+class HttpClient:
+    pass
+
+@rest_controller("/api")
+class MyController:
+    # 以下方式都可以成功注入：
+
+    # 方式1：按自定义名称（参数名匹配）
+    def __init__(self, my_http: HttpClient):
+        pass
+
+    # 方式2：按自动转换名称
+    def __init__(self, http_client: HttpClient):
+        pass
+
+    # 方式3：按类型匹配（参数名任意）
+    def __init__(self, client: HttpClient):
+        pass
+
+    # 方式4：显式指定名称
+    def __init__(self, x: Provide['my_http']):
+        pass
 ```
 
 ## 高级特性
@@ -428,6 +514,8 @@ def get_user(user_id: int):
 - ✅ 无需手动获取和传递依赖
 - ✅ 支持多级依赖和可选依赖
 - ✅ 自动检测循环依赖
+- ✅ 支持 Client 注入到 Service 和 Controller
+- ✅ 支持多种依赖查找方式（名称、类型）
 - ✅ 保持向后兼容，现有代码无需修改
 
 开始使用依赖注入，让代码更加清晰和可维护！

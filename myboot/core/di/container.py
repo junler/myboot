@@ -46,6 +46,29 @@ class DependencyContainer:
         provider = ServiceProvider(service_class, service_name, scope, **(config or {}))
         self.service_providers[service_name] = provider
     
+    def register_instance(self, name: str, instance: Any) -> None:
+        """
+        注册已创建的实例到容器（用于 Client 等外部创建的实例）
+        
+        Args:
+            name: 实例名称
+            instance: 实例对象
+        """
+        # 直接缓存实例
+        self.service_instances[name] = instance
+        
+        # 通知注册表（避免依赖检查时产生警告）
+        self.registry.known_instances.add(name)
+        
+        # 创建一个返回已有实例的提供者
+        di_provider = providers.Object(instance)
+        setattr(self.container, name, di_provider)
+        
+        # 创建占位的 ServiceProvider（用于 has_service 检查）
+        placeholder = ServiceProvider(type(instance), name, ServiceProvider.SINGLETON)
+        placeholder._provider = di_provider
+        self.service_providers[name] = placeholder
+    
     def build_container(self) -> None:
         """
         构建依赖注入容器
@@ -144,18 +167,21 @@ class DependencyContainer:
         Raises:
             KeyError: 如果服务不存在
         """
+        # 先检查是否有已缓存的实例（包括通过 register_instance 注册的）
+        if service_name in self.service_instances:
+            return self.service_instances[service_name]
+        
         if service_name not in self.service_providers:
             raise KeyError(f"服务 '{service_name}' 未注册")
         
         # 如果是单例，缓存实例
         provider = self.service_providers[service_name]
         if provider.scope == ServiceProvider.SINGLETON:
-            if service_name not in self.service_instances:
-                di_provider = getattr(self.container, service_name, None)
-                if di_provider:
-                    self.service_instances[service_name] = di_provider()
-                else:
-                    raise RuntimeError(f"服务 '{service_name}' 的提供者未正确配置")
+            di_provider = getattr(self.container, service_name, None)
+            if di_provider:
+                self.service_instances[service_name] = di_provider()
+            else:
+                raise RuntimeError(f"服务 '{service_name}' 的提供者未正确配置")
             return self.service_instances[service_name]
         else:
             # 工厂模式，每次创建新实例
@@ -175,7 +201,7 @@ class DependencyContainer:
         Returns:
             是否存在
         """
-        return service_name in self.service_providers
+        return service_name in self.service_providers or service_name in self.service_instances
     
     def get_all_services(self) -> Dict[str, Any]:
         """

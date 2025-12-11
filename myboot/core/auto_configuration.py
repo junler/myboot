@@ -2,19 +2,48 @@
 自动配置模块
 
 实现约定优于配置的设计理念，提供自动发现和配置功能
+
+设计参考 Spring Boot：
+- 使用 AST 静态分析替代 import（发现阶段不执行代码）
+- 延迟导入：只在注册阶段才导入需要的模块
+- 缓存 AST 分析结果，缓存命中时完全跳过分析
 """
 
 import os
 import re
+import ast
+import json
+import time
 import importlib
 import inspect
 from pathlib import Path
-from typing import Dict, List, Type, Any, Optional, Callable
+from typing import Dict, List, Type, Any, Optional, Callable, Set
 from functools import wraps
 
 from loguru import logger as loguru_logger
 
 logger = loguru_logger.bind(name=__name__)
+
+# 缓存版本号，修改扫描逻辑时递增以使旧缓存失效
+_CACHE_VERSION = "2.0"
+
+# MyBoot 装饰器到组件类型的映射
+_DECORATOR_MAPPING = {
+    'service': 'services',
+    'client': 'clients',
+    'model': 'models',
+    'rest_controller': 'rest_controllers',
+    'route': 'routes',
+    'get': 'routes',
+    'post': 'routes',
+    'put': 'routes',
+    'delete': 'routes',
+    'patch': 'routes',
+    'middleware': 'middleware',
+    'cron': 'jobs',
+    'interval': 'jobs',
+    'once': 'jobs',
+}
 
 
 def _camel_to_snake(name: str) -> str:
@@ -51,11 +80,31 @@ def _find_project_root() -> str:
 
 
 class AutoConfigurationManager:
-    """自动配置管理器"""
+    """
+    自动配置管理器
     
-    def __init__(self, app_root: str = None):
+    设计参考 Spring Boot：
+    - 发现阶段：使用 AST 静态分析，不执行 import
+    - 注册阶段：延迟导入，只导入需要的模块
+    - 缓存：缓存 AST 分析结果，缓存命中时完全跳过分析
+    """
+    
+    def __init__(self, app_root: str = None, use_cache: bool = True, parallel_import: bool = False):
         self.app_root = app_root or _find_project_root()
-        self.discovered_components = {
+        self.use_cache = use_cache
+        self.parallel_import = parallel_import
+        # 组件元数据（不包含实际类对象，只有模块路径和名称）
+        self._component_metadata: Dict[str, List[dict]] = {
+            'routes': [],
+            'jobs': [],
+            'middleware': [],
+            'services': [],
+            'models': [],
+            'clients': [],
+            'rest_controllers': []
+        }
+        # 已加载的组件（包含实际类对象，延迟填充）
+        self.discovered_components: Dict[str, List[dict]] = {
             'routes': [],
             'jobs': [],
             'middleware': [],
@@ -65,141 +114,280 @@ class AutoConfigurationManager:
             'rest_controllers': []
         }
         self.auto_configured = False
+        self._modules_loaded = False
+    
+    def _get_cache_path(self, package_name: str) -> Path:
+        """获取缓存文件路径"""
+        return Path(self.app_root) / f".myboot_cache_{package_name}.json"
+    
+    def _collect_source_files(self, package_path: Path) -> Dict[str, float]:
+        """收集所有源文件及其修改时间"""
+        files = {}
+        for item in package_path.rglob("*.py"):
+            if not item.name.startswith("__"):
+                files[str(item)] = item.stat().st_mtime
+        return files
+    
+    def _is_cache_valid(self, cache_path: Path, package_path: Path) -> bool:
+        """检查缓存是否有效"""
+        if not cache_path.exists():
+            return False
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            if cache.get('version') != _CACHE_VERSION:
+                return False
+            current_files = self._collect_source_files(package_path)
+            cached_files = cache.get('source_files', {})
+            return current_files == cached_files
+        except Exception:
+            return False
+    
+    def _save_cache(self, cache_path: Path, package_path: Path) -> None:
+        """保存元数据缓存（不包含类对象）"""
+        try:
+            cache = {
+                'version': _CACHE_VERSION,
+                'source_files': self._collect_source_files(package_path),
+                'components': self._component_metadata
+            }
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, indent=2)
+        except Exception as e:
+            logger.warning(f"保存缓存失败: {e}")
+    
+    def _load_cache(self, cache_path: Path) -> bool:
+        """从缓存加载元数据（不导入模块）"""
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache = json.load(f)
+            self._component_metadata = cache.get('components', {})
+            return True
+        except Exception as e:
+            logger.warning(f"加载缓存失败: {e}")
+            return False
+    
+    def _parse_decorators(self, node: ast.AST) -> List[str]:
+        """解析装饰器名称"""
+        decorators = []
+        decorator_list = getattr(node, 'decorator_list', [])
+        for dec in decorator_list:
+            if isinstance(dec, ast.Name):
+                decorators.append(dec.id)
+            elif isinstance(dec, ast.Call):
+                if isinstance(dec.func, ast.Name):
+                    decorators.append(dec.func.id)
+                elif isinstance(dec.func, ast.Attribute):
+                    decorators.append(dec.func.attr)
+        return decorators
+    
+    def _scan_file_ast(self, file_path: Path, module_name: str) -> None:
+        """使用 AST 静态分析扫描单个文件（不执行 import）"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                source = f.read()
+            tree = ast.parse(source, filename=str(file_path))
+        except Exception as e:
+            logger.warning(f"AST 解析失败 {file_path}: {e}")
+            return
+        
+        # 只遍历模块顶层节点（避免 ast.walk 的问题）
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                decorators = self._parse_decorators(node)
+                for dec_name in decorators:
+                    if dec_name in _DECORATOR_MAPPING:
+                        component_type = _DECORATOR_MAPPING[dec_name]
+                        self._component_metadata[component_type].append({
+                            'module': module_name,
+                            'class_name': node.name,
+                            'type': f'class_{dec_name}'
+                        })
+                # 检查类方法中的装饰器（如 @cron）
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        method_decorators = self._parse_decorators(item)
+                        for dec_name in method_decorators:
+                            if dec_name in ('cron', 'interval', 'once'):
+                                self._component_metadata['jobs'].append({
+                                    'module': module_name,
+                                    'class_name': node.name,
+                                    'method_name': item.name,
+                                    'type': 'class_method_job'
+                                })
+            
+            elif isinstance(node, ast.FunctionDef):
+                # 模块级函数
+                decorators = self._parse_decorators(node)
+                for dec_name in decorators:
+                    if dec_name in _DECORATOR_MAPPING:
+                        component_type = _DECORATOR_MAPPING[dec_name]
+                        self._component_metadata[component_type].append({
+                            'module': module_name,
+                            'func_name': node.name,
+                            'type': f'function_{dec_name}'
+                        })
+    
+    def _scan_package_ast(self, package_path: Path) -> None:
+        """使用 AST 递归扫描包（不执行 import）"""
+        for item in package_path.rglob("*.py"):
+            if item.name.startswith("__"):
+                continue
+            # 计算模块名
+            rel_path = item.relative_to(package_path.parent)
+            module_name = str(rel_path.with_suffix('')).replace(os.sep, '.')
+            self._scan_file_ast(item, module_name)
+    
+    def _load_modules(self) -> None:
+        """延迟加载模块，将元数据转换为实际的类对象"""
+        if self._modules_loaded:
+            return
+        
+        # 收集需要导入的模块（去重）
+        modules_to_import: Set[str] = set()
+        for items in self._component_metadata.values():
+            for item in items:
+                modules_to_import.add(item['module'])
+        
+        # 批量导入模块
+        imported_modules: Dict[str, Any] = {}
+        slow_modules = []  # 记录慢模块
+        
+        def import_single(module_name: str):
+            """导入单个模块并返回结果"""
+            try:
+                start = time.perf_counter()
+                module = importlib.import_module(module_name)
+                elapsed = (time.perf_counter() - start) * 1000
+                return module_name, module, elapsed, None
+            except Exception as e:
+                return module_name, None, 0, e
+        
+        if self.parallel_import and len(modules_to_import) > 1:
+            # 并行导入（对 I/O 密集的模块有帮助）
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=min(8, len(modules_to_import))) as executor:
+                futures = {executor.submit(import_single, m): m for m in modules_to_import}
+                for future in as_completed(futures):
+                    module_name, module, elapsed, error = future.result()
+                    if error:
+                        logger.error(f"导入模块失败 {module_name}: {error}")
+                    else:
+                        imported_modules[module_name] = module
+                        if elapsed > 100:
+                            slow_modules.append((module_name, elapsed))
+        else:
+            # 串行导入
+            for module_name in modules_to_import:
+                module_name, module, elapsed, error = import_single(module_name)
+                if error:
+                    logger.error(f"导入模块失败 {module_name}: {error}")
+                else:
+                    imported_modules[module_name] = module
+                    if elapsed > 100:
+                        slow_modules.append((module_name, elapsed))
+        
+        # 输出慢模块报告
+        if slow_modules:
+            slow_modules.sort(key=lambda x: x[1], reverse=True)
+            report = ", ".join([f"{name}({ms:.0f}ms)" for name, ms in slow_modules[:10]])
+            logger.warning(f"慢模块导入: {report}")
+        
+        # 将元数据转换为包含实际类对象的组件
+        for component_type, items in self._component_metadata.items():
+            for item in items:
+                module = imported_modules.get(item['module'])
+                if not module:
+                    continue
+                
+                entry = {'module': item['module'], 'type': item['type']}
+                
+                if 'class_name' in item:
+                    cls = getattr(module, item['class_name'], None)
+                    if cls:
+                        entry['class'] = cls
+                    else:
+                        continue
+                
+                if 'func_name' in item:
+                    func = getattr(module, item['func_name'], None)
+                    if func:
+                        entry['function'] = func
+                    else:
+                        continue
+                
+                if 'method_name' in item:
+                    entry['method_name'] = item['method_name']
+                    if 'class' in entry:
+                        entry['method'] = getattr(entry['class'], item['method_name'], None)
+                
+                self.discovered_components[component_type].append(entry)
+        
+        self._modules_loaded = True
     
     def auto_discover(self, package_name: str = "app") -> None:
-        """自动发现应用组件"""
+        """
+        自动发现应用组件（AST 静态分析，不执行 import）
+        
+        模块的实际导入延迟到 apply_auto_configuration 时进行
+        """
+        start_time = time.perf_counter()
         logger.info(f"开始自动发现 {package_name} 包中的组件...")
-        logger.debug(f"扫描根目录: {self.app_root}")
         
         try:
-            # 获取包路径
             package_path = Path(self.app_root) / package_name
-            logger.debug(f"尝试扫描路径: {package_path}")
             if not package_path.exists():
                 logger.warning(f"包路径不存在: {package_path}")
                 return
             
-            # 递归扫描包
-            self._scan_package(package_path, package_name)
+            cache_path = self._get_cache_path(package_name)
             
-            logger.debug(f"自动发现完成，发现组件: {self.discovered_components}")
+            # 尝试使用缓存（只读取元数据，不导入模块）
+            if self.use_cache and self._is_cache_valid(cache_path, package_path):
+                if self._load_cache(cache_path):
+                    self.auto_configured = True
+                    elapsed = (time.perf_counter() - start_time) * 1000
+                    logger.info(f"自动发现完成（从缓存加载），耗时: {elapsed:.2f}ms")
+                    return
+            
+            # AST 静态分析扫描（不执行 import）
+            self._scan_package_ast(package_path)
+            
+            # 保存缓存
+            if self.use_cache:
+                self._save_cache(cache_path, package_path)
+            
             self.auto_configured = True
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info(f"自动发现完成（AST 扫描），耗时: {elapsed:.2f}ms")
             
         except Exception as e:
             logger.error(f"自动发现失败: {e}", exc_info=True)
     
-    def _scan_package(self, package_path: Path, package_name: str) -> None:
-        """递归扫描包"""
-        for item in package_path.iterdir():
-            if item.is_file() and item.name.endswith('.py') and not item.name.startswith('__'):
-                # 扫描 Python 文件
-                module_name = f"{package_name}.{item.stem}"
-                self._scan_module(module_name)
-            elif item.is_dir() and not item.name.startswith('__'):
-                # 递归扫描子包
-                sub_package_name = f"{package_name}.{item.name}"
-                self._scan_package(item, sub_package_name)
-    
-    def _scan_module(self, module_name: str) -> None:
-        """扫描模块中的组件"""
-        try:
-            module = importlib.import_module(module_name)
-            
-            # 扫描模块中的所有对象
-            for name, obj in inspect.getmembers(module):
-                if inspect.isfunction(obj):
-                    self._check_function(obj, module_name)
-                elif inspect.isclass(obj):
-                    self._check_class(obj, module_name)
-                    
-        except Exception as e:
-            logger.error(f"扫描模块 {module_name} 失败: {e}", exc_info=True)
-    
-    def _check_function(self, func: Callable, module_name: str) -> None:
-        """检查函数是否是装饰的组件"""
-        if hasattr(func, '__myboot_route__'):
-            self.discovered_components['routes'].append({
-                'function': func,
-                'module': module_name,
-                'type': 'function_route'
-            })
-        elif hasattr(func, '__myboot_job__'):
-            self.discovered_components['jobs'].append({
-                'function': func,
-                'module': module_name,
-                'type': 'function_job'
-            })
-        elif hasattr(func, '__myboot_middleware__'):
-            self.discovered_components['middleware'].append({
-                'function': func,
-                'module': module_name,
-                'type': 'function_middleware'
-            })
-    
-    def _check_class(self, cls: Type, module_name: str) -> None:
-        """检查类是否是装饰的组件"""
-        # 检查类中的方法是否有任务装饰器
-        for name, method in inspect.getmembers(cls, predicate=inspect.isfunction):
-            if hasattr(method, '__myboot_job__'):
-                # 发现类方法中的任务
-                self.discovered_components['jobs'].append({
-                    'class': cls,
-                    'method': method,
-                    'method_name': name,
-                    'module': module_name,
-                    'type': 'class_method_job'
-                })
-        
-        # 检查类本身的装饰器
-        if hasattr(cls, '__myboot_rest_controller__'):
-            self.discovered_components['rest_controllers'].append({
-                'class': cls,
-                'module': module_name,
-                'type': 'rest_controller'
-            })
-        elif hasattr(cls, '__myboot_service__'):
-            self.discovered_components['services'].append({
-                'class': cls,
-                'module': module_name,
-                'type': 'service'
-            })
-        elif hasattr(cls, '__myboot_model__'):
-            self.discovered_components['models'].append({
-                'class': cls,
-                'module': module_name,
-                'type': 'model'
-            })
-        elif hasattr(cls, '__myboot_client__'):
-            self.discovered_components['clients'].append({
-                'class': cls,
-                'module': module_name,
-                'type': 'client'
-            })
-        elif hasattr(cls, '__myboot_route__'):
-            self.discovered_components['routes'].append({
-                'class': cls,
-                'module': module_name,
-                'type': 'class_route'
-            })
-    
     def apply_auto_configuration(self, app) -> None:
-        """应用自动配置"""
+        """应用自动配置（此时才执行模块导入）"""
         if not self.auto_configured:
             logger.warning("自动发现未完成，跳过自动配置")
             return
         
-        logger.debug("开始应用自动配置...")
+        start_time = time.perf_counter()
         
-       
+        # 延迟加载模块（将元数据转换为实际类对象）
+        load_start = time.perf_counter()
+        self._load_modules()
+        load_elapsed = (time.perf_counter() - load_start) * 1000
+        logger.info(f"模块加载完成，耗时: {load_elapsed:.2f}ms")
+        
         self._auto_register_routes(app)
-        self._auto_register_services(app)  # 先注册服务，支持依赖注入
         self._auto_register_models(app)
         self._auto_register_clients(app)
+        self._auto_register_services(app)  # 先注册服务，支持依赖注入
         self._auto_register_jobs(app)  # 再注册任务，可以使用已注册的服务
         self._auto_register_middleware(app)
         self._auto_register_rest_controllers(app)
         
-        logger.debug("自动配置应用完成")
+        elapsed = (time.perf_counter() - start_time) * 1000
+        logger.info(f"自动配置应用完成，耗时: {elapsed:.2f}ms")
     
     def _auto_register_rest_controllers(self, app) -> None:
         """自动注册 REST 控制器
@@ -323,7 +511,8 @@ class AutoConfigurationManager:
         """
         获取类实例，支持依赖注入
         
-        只从 di_container 获取依赖，找不到直接报错，不尝试初始化
+        从 di_container 获取 service 依赖，从 app.clients 获取 client 依赖
+        找不到直接报错，不尝试初始化
         
         Args:
             cls: 类
@@ -334,7 +523,7 @@ class AutoConfigurationManager:
             
         Raises:
             RuntimeError: 如果 di_container 不存在或依赖注入失败
-            KeyError: 如果必需依赖未在 DI 容器中注册
+            KeyError: 如果必需依赖未注册
         """
         # 检查 di_container 是否存在
         if not hasattr(app, 'di_container'):
@@ -350,6 +539,14 @@ class AutoConfigurationManager:
                 return di_container.get_service(service_name)
             raise KeyError(f"服务 '{service_name}' 未在 DI 容器中注册")
         
+        # 检查类是否有 @client 装饰器
+        if hasattr(cls, '__myboot_client__'):
+            client_config = getattr(cls, '__myboot_client__')
+            client_name = client_config.get('name', _camel_to_snake(cls.__name__))
+            if hasattr(app, 'clients') and client_name in app.clients:
+                return app.clients[client_name]
+            raise KeyError(f"客户端 '{client_name}' 未注册")
+        
         # 检查构造函数是否有依赖
         from myboot.core.di.decorators import get_injectable_params
         params = get_injectable_params(cls.__init__)
@@ -358,35 +555,54 @@ class AutoConfigurationManager:
             # 没有依赖参数，直接实例化
             return cls()
         
-        # 有依赖参数，从 DI 容器获取依赖
+        # 有依赖参数，从 DI 容器和 clients 获取依赖
         dependencies = {}
         for param_name, param_info in params.items():
-            service_name = param_info.get('service_name')
-            if not service_name:
+            dependency_name = param_info.get('service_name')
+            if not dependency_name:
                 continue
             
             is_optional = param_info.get('is_optional', False)
+            dependency_instance = None
+            found = False
             
-            # 检查依赖是否存在
-            if not di_container.has_service(service_name):
-                if not is_optional:
-                    raise KeyError(
-                        f"无法实例化 {cls.__name__}："
-                        f"必需依赖 '{service_name}' (参数 '{param_name}') 未在 DI 容器中注册"
-                    )
-                continue
+            # 优先从 DI 容器获取 service
+            if di_container.has_service(dependency_name):
+                try:
+                    dependency_instance = di_container.get_service(dependency_name)
+                    logger.debug(f"从 DI 容器注入 service 依赖: {param_name} = {dependency_name}")
+                    found = True
+                except Exception as e:
+                    if not is_optional:
+                        raise RuntimeError(
+                            f"无法实例化 {cls.__name__}："
+                            f"获取 service 依赖 '{dependency_name}' (参数 '{param_name}') 失败: {e}"
+                        ) from e
+                    logger.debug(f"获取可选 service 依赖 '{dependency_name}' 失败: {e}")
             
-            # 获取依赖
-            try:
-                dependencies[param_name] = di_container.get_service(service_name)
-                logger.debug(f"从 DI 容器注入依赖: {param_name} = {service_name}")
-            except Exception as e:
-                if not is_optional:
-                    raise RuntimeError(
-                        f"无法实例化 {cls.__name__}："
-                        f"获取依赖 '{service_name}' (参数 '{param_name}') 失败: {e}"
-                    ) from e
-                logger.debug(f"获取可选依赖 '{service_name}' 失败: {e}")
+            # 如果没找到 service，尝试从 clients 获取
+            if not found and hasattr(app, 'clients'):
+                # 先按名称查找
+                if dependency_name in app.clients:
+                    dependency_instance = app.clients[dependency_name]
+                    found = True
+                # 再尝试按类型查找
+                elif hasattr(app, '_client_type_map'):
+                    param_type = param_info.get('type')
+                    if param_type and param_type in app._client_type_map:
+                        actual_name = app._client_type_map[param_type]
+                        dependency_instance = app.clients[actual_name]
+                        found = True
+            
+            # 如果都没找到且不是可选的，报错
+            if not found and not is_optional:
+                raise KeyError(
+                    f"无法实例化 {cls.__name__}："
+                    f"必需依赖 '{dependency_name}' (参数 '{param_name}') 未在 DI 容器或 clients 中注册"
+                )
+            
+            if found and dependency_instance is not None:
+                dependencies[param_name] = dependency_instance
         
         # 使用依赖实例化
         logger.debug(f"使用依赖注入实例化 {cls.__name__}: {list(dependencies.keys())}")
@@ -668,6 +884,15 @@ class AutoConfigurationManager:
     
     def _auto_register_clients(self, app) -> None:
         """自动注册客户端"""
+        # 初始化类型到名称的映射（用于按类型查找）
+        if not hasattr(app, '_client_type_map'):
+            app._client_type_map = {}
+        
+        # 初始化 DI 容器（如果还没有）
+        if not hasattr(app, 'di_container'):
+            from myboot.core.di import DependencyContainer
+            app.di_container = DependencyContainer()
+        
         for client_info in self.discovered_components['clients']:
             try:
                 cls = client_info['class']
@@ -675,8 +900,22 @@ class AutoConfigurationManager:
                 
                 # 创建客户端实例并注册到应用上下文
                 instance = cls()
-                client_name = client_config.get('name', cls.__name__.lower())
+                # 优先使用用户自定义名称，否则使用 _camel_to_snake 自动生成
+                client_name = client_config.get('name', _camel_to_snake(cls.__name__))
                 app.clients[client_name] = instance
+                
+                # 同时记录类型映射，用于按类型查找
+                app._client_type_map[cls] = client_name
+                # 也用自动转换的名称注册（如果不同），方便按类型名查找
+                auto_name = _camel_to_snake(cls.__name__)
+                if auto_name != client_name and auto_name not in app.clients:
+                    app.clients[auto_name] = instance
+                
+                # 将 client 实例注册到 DI 容器（作为已创建的单例）
+                # 这样 Service 可以通过 DI 容器获取 Client 依赖
+                app.di_container.register_instance(client_name, instance)
+                if auto_name != client_name:
+                    app.di_container.register_instance(auto_name, instance)
                 
                 logger.info(f"自动注册客户端: '{client_name}' ({client_info['module']}.{cls.__name__})")
             except Exception as e:
