@@ -11,6 +11,7 @@ MyBoot 框架提供了基于 `dependency_injector` 的自动依赖注入功能�
   - [多级依赖](#3-多级依赖)
   - [可选依赖](#4-可选依赖)
   - [Client 依赖注入](#5-client-依赖注入)
+  - [Component 组件](#6-component-组件)
 - [高级特性](#高级特性)
 - [最佳实践](#最佳实践)
 - [常见问题](#常见问题)
@@ -223,6 +224,110 @@ class MyController:
     # 方式4：显式指定名称
     def __init__(self, x: Provide['my_http']):
         pass
+```
+
+### 6. Component 组件
+
+`@component` 装饰器用于注册通用组件，支持依赖注入。它可用于任意需要托管的类（工具类、配置类、包含定时任务的类等）。
+
+#### 基本用法
+
+```python
+from myboot.core.decorators import component
+
+@component()
+class EmailHelper:
+    """邮件工具类"""
+    def send(self, to: str, content: str):
+        print(f"发送邮件到 {to}: {content}")
+```
+
+#### 带依赖注入
+
+```python
+from myboot.core.decorators import component, client
+
+@client()
+class SmtpClient:
+    def send_mail(self, to: str, subject: str, body: str):
+        pass
+
+@component(name='email_helper')
+class EmailHelper:
+    """带依赖注入的组件"""
+    def __init__(self, smtp_client: SmtpClient):
+        self.smtp = smtp_client
+    
+    def send(self, to: str, subject: str, body: str):
+        self.smtp.send_mail(to, subject, body)
+```
+
+#### 包含定时任务的组件
+
+**重要**：定时任务（`@cron`、`@interval`、`@once`）**必须**在 `@component` 装饰的类中定义。这是定义定时任务的唯一方式，不再支持模块级函数或 `@service` 类中的定时任务。
+
+```python
+from myboot.core.decorators import component, service, cron, interval
+
+@service()
+class DataService:
+    def sync(self):
+        print("同步数据...")
+    
+    def health_check(self):
+        print("健康检查...")
+
+@component()
+class DataSyncJobs:
+    """数据同步任务集合 - 自动注入 DataService"""
+    
+    def __init__(self, data_service: DataService):
+        self.data_service = data_service
+    
+    @cron("0 2 * * *")  # 每天凌晨 2 点
+    def sync_daily_data(self):
+        """每日数据同步"""
+        self.data_service.sync()
+    
+    @interval(hours=1)  # 每小时
+    def check_data_health(self):
+        """数据健康检查"""
+        self.data_service.health_check()
+```
+
+**注意**：
+- 定时任务方法会在组件注册时自动扫描并注册到调度器
+- 组件支持依赖注入，可以在构造函数中注入所需的服务
+
+#### Component 配置选项
+
+```python
+@component(
+    name='my_component',    # 组件名称，默认使用类名的 snake_case
+    scope='singleton',      # 生命周期：'singleton'（默认）或 'prototype'
+    lazy=False,             # 是否懒加载
+    primary=False           # 当按类型获取有多个匹配时，是否为首选
+)
+class MyComponent:
+    pass
+```
+
+#### 从容器获取组件
+
+```python
+from myboot.core.application import app
+
+# 方式1：通过 container 获取
+email_helper = app().container.get('email_helper')
+
+# 方式2：通过 Application 直接获取
+email_helper = app().get_component('email_helper')
+
+# 方式3：依赖注入（推荐）
+@component()
+class NotificationService:
+    def __init__(self, email_helper: EmailHelper):
+        self.email_helper = email_helper
 ```
 
 ## 高级特性
@@ -515,6 +620,7 @@ def get_user(user_id: int):
 - ✅ 支持多级依赖和可选依赖
 - ✅ 自动检测循环依赖
 - ✅ 支持 Client 注入到 Service 和 Controller
+- ✅ 支持 Component 组件，可包含定时任务
 - ✅ 支持多种依赖查找方式（名称、类型）
 - ✅ 保持向后兼容，现有代码无需修改
 

@@ -25,13 +25,16 @@ from loguru import logger as loguru_logger
 logger = loguru_logger.bind(name=__name__)
 
 # 缓存版本号，修改扫描逻辑时递增以使旧缓存失效
-_CACHE_VERSION = "2.0"
+_CACHE_VERSION = "3.0"
 
 # MyBoot 装饰器到组件类型的映射
+# 注意：@cron/@interval/@once 装饰器只能在 @component 类中使用
+# job 方法的注册在 _auto_register_components 中动态进行
 _DECORATOR_MAPPING = {
     'service': 'services',
     'client': 'clients',
     'model': 'models',
+    'component': 'components',
     'rest_controller': 'rest_controllers',
     'route': 'routes',
     'get': 'routes',
@@ -40,9 +43,6 @@ _DECORATOR_MAPPING = {
     'delete': 'routes',
     'patch': 'routes',
     'middleware': 'middleware',
-    'cron': 'jobs',
-    'interval': 'jobs',
-    'once': 'jobs',
 }
 
 
@@ -96,21 +96,21 @@ class AutoConfigurationManager:
         # 组件元数据（不包含实际类对象，只有模块路径和名称）
         self._component_metadata: Dict[str, List[dict]] = {
             'routes': [],
-            'jobs': [],
             'middleware': [],
             'services': [],
             'models': [],
             'clients': [],
+            'components': [],
             'rest_controllers': []
         }
         # 已加载的组件（包含实际类对象，延迟填充）
         self.discovered_components: Dict[str, List[dict]] = {
             'routes': [],
-            'jobs': [],
             'middleware': [],
             'services': [],
             'models': [],
             'clients': [],
+            'components': [],
             'rest_controllers': []
         }
         self.auto_configured = False
@@ -192,6 +192,8 @@ class AutoConfigurationManager:
             return
         
         # 只遍历模块顶层节点（避免 ast.walk 的问题）
+        # 注意：job 方法（@cron/@interval/@once）只能在 @component 类中定义
+        # job 方法的注册在 _auto_register_components 中动态进行，不在 AST 扫描阶段处理
         for node in tree.body:
             if isinstance(node, ast.ClassDef):
                 decorators = self._parse_decorators(node)
@@ -203,18 +205,6 @@ class AutoConfigurationManager:
                             'class_name': node.name,
                             'type': f'class_{dec_name}'
                         })
-                # 检查类方法中的装饰器（如 @cron）
-                for item in node.body:
-                    if isinstance(item, ast.FunctionDef):
-                        method_decorators = self._parse_decorators(item)
-                        for dec_name in method_decorators:
-                            if dec_name in ('cron', 'interval', 'once'):
-                                self._component_metadata['jobs'].append({
-                                    'module': module_name,
-                                    'class_name': node.name,
-                                    'method_name': item.name,
-                                    'type': 'class_method_job'
-                                })
             
             elif isinstance(node, ast.FunctionDef):
                 # 模块级函数
@@ -382,7 +372,7 @@ class AutoConfigurationManager:
         self._auto_register_models(app)
         self._auto_register_clients(app)
         self._auto_register_services(app)  # 先注册服务，支持依赖注入
-        self._auto_register_jobs(app)  # 再注册任务，可以使用已注册的服务
+        self._auto_register_components(app)  # 注册组件并注册其中的 job 方法
         self._auto_register_middleware(app)
         self._auto_register_rest_controllers(app)
         
@@ -511,7 +501,7 @@ class AutoConfigurationManager:
         """
         获取类实例，支持依赖注入
         
-        从 di_container 获取 service 依赖，从 app.clients 获取 client 依赖
+        从 di_container 获取 service 依赖，从 app.components、app.clients 获取依赖
         找不到直接报错，不尝试初始化
         
         Args:
@@ -547,6 +537,14 @@ class AutoConfigurationManager:
                 return app.clients[client_name]
             raise KeyError(f"客户端 '{client_name}' 未注册")
         
+        # 检查类是否有 @component 装饰器且已注册
+        if hasattr(cls, '__myboot_component__'):
+            component_config = getattr(cls, '__myboot_component__')
+            component_name = component_config.get('name', _camel_to_snake(cls.__name__))
+            if hasattr(app, 'components') and component_name in app.components:
+                return app.components[component_name]
+            # 组件尚未注册，继续创建新实例
+        
         # 检查构造函数是否有依赖
         from myboot.core.di.decorators import get_injectable_params
         params = get_injectable_params(cls.__init__)
@@ -580,11 +578,27 @@ class AutoConfigurationManager:
                         ) from e
                     logger.debug(f"获取可选 service 依赖 '{dependency_name}' 失败: {e}")
             
-            # 如果没找到 service，尝试从 clients 获取
+            # 如果没找到 service，尝试从 components 获取
+            if not found and hasattr(app, 'components'):
+                # 先按名称查找
+                if dependency_name in app.components:
+                    dependency_instance = app.components[dependency_name]
+                    logger.debug(f"从 components 注入依赖: {param_name} = {dependency_name}")
+                    found = True
+                # 再尝试按类型查找
+                elif hasattr(app, '_component_type_map'):
+                    param_type = param_info.get('type')
+                    if param_type and param_type in app._component_type_map:
+                        actual_name = app._component_type_map[param_type]
+                        dependency_instance = app.components[actual_name]
+                        found = True
+            
+            # 如果没找到 component，尝试从 clients 获取
             if not found and hasattr(app, 'clients'):
                 # 先按名称查找
                 if dependency_name in app.clients:
                     dependency_instance = app.clients[dependency_name]
+                    logger.debug(f"从 clients 注入依赖: {param_name} = {dependency_name}")
                     found = True
                 # 再尝试按类型查找
                 elif hasattr(app, '_client_type_map'):
@@ -598,7 +612,7 @@ class AutoConfigurationManager:
             if not found and not is_optional:
                 raise KeyError(
                     f"无法实例化 {cls.__name__}："
-                    f"必需依赖 '{dependency_name}' (参数 '{param_name}') 未在 DI 容器或 clients 中注册"
+                    f"必需依赖 '{dependency_name}' (参数 '{param_name}') 未在 DI 容器、components 或 clients 中注册"
                 )
             
             if found and dependency_instance is not None:
@@ -607,86 +621,6 @@ class AutoConfigurationManager:
         # 使用依赖实例化
         logger.debug(f"使用依赖注入实例化 {cls.__name__}: {list(dependencies.keys())}")
         return cls(**dependencies)
-    
-    def _auto_register_jobs(self, app) -> None:
-        """自动注册任务"""
-        for job_info in self.discovered_components['jobs']:
-            try:
-                # 处理类方法任务
-                if job_info['type'] == 'class_method_job':
-                    cls = job_info['class']
-                    method = job_info['method']
-                    method_name = job_info['method_name']
-                    job_config = getattr(method, '__myboot_job__')
-                    
-                    # 检查任务是否启用
-                    if not self._is_job_enabled(method, job_config):
-                        logger.info(f"任务已禁用，跳过注册: {cls.__name__}.{method_name} ({job_info['module']})")
-                        continue
-                    
-                    # 创建类实例并绑定方法（支持依赖注入）
-                    try:
-                        instance = self._get_class_instance(cls, app)
-                        bound_method = getattr(instance, method_name)
-                    except Exception as e:
-                        logger.error(f"创建类实例失败 {cls.__name__}: {e}", exc_info=True)
-                        continue
-                    
-                    # 注册绑定的方法
-                    if job_config['type'] == 'cron':
-                        app.scheduler.add_cron_job(
-                            func=bound_method,
-                            cron=job_config['cron'],
-                            **job_config.get('kwargs', {})
-                        )
-                    elif job_config['type'] == 'interval':
-                        app.scheduler.add_interval_job(
-                            func=bound_method,
-                            interval=job_config['interval'],
-                            **job_config.get('kwargs', {})
-                        )
-                    elif job_config['type'] == 'once':
-                        app.scheduler.add_date_job(
-                            func=bound_method,
-                            run_date=job_config['run_date'],
-                            **job_config.get('kwargs', {})
-                        )
-                    
-                    logger.info(f"自动注册任务（类方法）: {cls.__name__}.{method_name} ({job_info['module']})")
-                
-                # 处理函数任务
-                elif job_info['type'] == 'function_job':
-                    func = job_info['function']
-                    job_config = getattr(func, '__myboot_job__')
-                    
-                    # 检查任务是否启用
-                    if not self._is_job_enabled(func, job_config):
-                        logger.info(f"任务已禁用，跳过注册: {func.__name__} ({job_info['module']})")
-                        continue
-                    
-                    if job_config['type'] == 'cron':
-                        app.scheduler.add_cron_job(
-                            func=func,
-                            cron=job_config['cron'],
-                            **job_config.get('kwargs', {})
-                        )
-                    elif job_config['type'] == 'interval':
-                        app.scheduler.add_interval_job(
-                            func=func,
-                            interval=job_config['interval'],
-                            **job_config.get('kwargs', {})
-                        )
-                    elif job_config['type'] == 'once':
-                        # 一次性任务的处理
-                        app.scheduler.add_date_job(
-                            func=func,
-                            run_date=job_config['run_date'],
-                            **job_config.get('kwargs', {})
-                        )
-                    
-                    logger.info(f"自动注册任务: {func.__name__} ({job_info['module']})")
-            except Exception as e:
-                logger.error(f"自动注册任务失败 {job_info.get('module', 'unknown')}: {e}", exc_info=True)
     
     def _auto_register_middleware(self, app) -> None:
         """自动注册中间件"""
@@ -920,6 +854,121 @@ class AutoConfigurationManager:
                 logger.info(f"自动注册客户端: '{client_name}' ({client_info['module']}.{cls.__name__})")
             except Exception as e:
                 logger.error(f"自动注册客户端失败 {client_info['module']}: {e}", exc_info=True)
+    
+    def _auto_register_components(self, app) -> None:
+        """自动注册组件（支持依赖注入）"""
+        # 初始化类型到名称的映射（用于按类型查找）
+        if not hasattr(app, '_component_type_map'):
+            app._component_type_map = {}
+        
+        for component_info in self.discovered_components['components']:
+            try:
+                cls = component_info['class']
+                component_config = getattr(cls, '__myboot_component__')
+                
+                # 获取组件配置
+                component_name = component_config.get('name', _camel_to_snake(cls.__name__))
+                lazy = component_config.get('lazy', False)
+                # scope 配置用于未来支持 prototype 模式
+                
+                # 懒加载的组件跳过立即实例化
+                if lazy:
+                    # 记录组件信息，延迟创建
+                    app._lazy_components = getattr(app, '_lazy_components', {})
+                    app._lazy_components[component_name] = {
+                        'class': cls,
+                        'config': component_config,
+                        'module': component_info['module']
+                    }
+                    logger.debug(f"已注册懒加载组件: '{component_name}' ({component_info['module']}.{cls.__name__})")
+                    continue
+                
+                # 创建组件实例（支持依赖注入）
+                try:
+                    instance = self._get_class_instance(cls, app)
+                except Exception as e:
+                    logger.error(f"创建组件实例失败 {cls.__name__}: {e}", exc_info=True)
+                    continue
+                
+                # 注册到组件注册表
+                app.components[component_name] = instance
+                
+                # 记录类型映射，用于按类型查找
+                app._component_type_map[cls] = component_name
+                
+                # 也用自动转换的名称注册（如果不同）
+                auto_name = _camel_to_snake(cls.__name__)
+                if auto_name != component_name and auto_name not in app.components:
+                    app.components[auto_name] = instance
+                
+                # 将组件实例注册到 DI 容器（作为已创建的单例）
+                # 这样其他组件可以通过 DI 容器获取依赖
+                if hasattr(app, 'di_container'):
+                    app.di_container.register_instance(component_name, instance)
+                    if auto_name != component_name:
+                        app.di_container.register_instance(auto_name, instance)
+                
+                # 注册组件内的 job 方法（@cron/@interval/@once）
+                self._register_component_jobs(app, instance, cls, component_info['module'])
+                
+                logger.info(f"自动注册组件: '{component_name}' ({component_info['module']}.{cls.__name__})")
+            except Exception as e:
+                logger.error(f"自动注册组件失败 {component_info['module']}: {e}", exc_info=True)
+    
+    def _register_component_jobs(self, app, instance, cls: Type, module_name: str) -> None:
+        """
+        注册组件内的 job 方法
+        
+        扫描组件实例中使用 @cron/@interval/@once 装饰器的方法，并注册到调度器
+        
+        Args:
+            app: 应用实例
+            instance: 组件实例
+            cls: 组件类
+            module_name: 模块名称
+        """
+        import inspect as inspect_module
+        
+        for method_name, method in inspect_module.getmembers(instance, predicate=inspect_module.ismethod):
+            # 跳过私有方法
+            if method_name.startswith('_'):
+                continue
+            
+            # 检查是否有 job 装饰器
+            if not hasattr(method, '__myboot_job__'):
+                continue
+            
+            job_config = getattr(method, '__myboot_job__')
+            
+            # 检查任务是否启用
+            if not self._is_job_enabled(method, job_config):
+                logger.info(f"任务已禁用，跳过注册: {cls.__name__}.{method_name} ({module_name})")
+                continue
+            
+            # 注册任务
+            try:
+                if job_config['type'] == 'cron':
+                    app.scheduler.add_cron_job(
+                        func=method,
+                        cron=job_config['cron'],
+                        **job_config.get('kwargs', {})
+                    )
+                elif job_config['type'] == 'interval':
+                    app.scheduler.add_interval_job(
+                        func=method,
+                        interval=job_config['interval'],
+                        **job_config.get('kwargs', {})
+                    )
+                elif job_config['type'] == 'once':
+                    app.scheduler.add_date_job(
+                        func=method,
+                        run_date=job_config['run_date'],
+                        **job_config.get('kwargs', {})
+                    )
+                
+                logger.info(f"自动注册任务（组件方法）: {cls.__name__}.{method_name} ({module_name})")
+            except Exception as e:
+                logger.error(f"注册任务失败 {cls.__name__}.{method_name}: {e}", exc_info=True)
 
 
 # 全局自动配置管理器实例

@@ -217,6 +217,63 @@ def client(name: str = None, **kwargs):
     return decorator
 
 
+def component(
+    name: str = None,
+    scope: str = 'singleton',
+    primary: bool = False,
+    lazy: bool = False,
+    **kwargs
+):
+    """
+    组件装饰器
+    
+    用于将类注册为通用组件，支持依赖注入。
+    可用于任意需要托管的类（Job 实例、工具类、配置类等）。
+    
+    Args:
+        name: 组件名称，默认使用类名的 snake_case 形式
+        scope: 生命周期范围
+            - 'singleton': 单例模式（默认），整个应用生命周期内只创建一个实例
+            - 'prototype': 原型模式，每次获取时创建新实例
+        primary: 当按类型获取有多个匹配时，是否为首选
+        lazy: 是否懒加载，True 时在首次使用时才创建实例
+        **kwargs: 其他组件参数
+    
+    Examples:
+        # 基本用法
+        @component()
+        class EmailHelper:
+            def send(self, to: str, content: str):
+                pass
+        
+        # 带依赖注入
+        @component(name='redis_cache')
+        class RedisCache:
+            def __init__(self, redis_client: RedisClient):
+                self.redis = redis_client
+        
+        # 包含定时任务的组件
+        @component()
+        class DataSyncJobs:
+            def __init__(self, data_service: DataService):
+                self.data_service = data_service
+            
+            @cron("0 2 * * *")
+            def sync_daily(self):
+                self.data_service.sync()
+    """
+    def decorator(cls):
+        cls.__myboot_component__ = {
+            'name': name or _camel_to_snake(cls.__name__),
+            'scope': scope,
+            'primary': primary,
+            'lazy': lazy,
+            'kwargs': kwargs
+        }
+        return cls
+    return decorator
+
+
 def middleware(
     name: str = None,
     order: int = 0,

@@ -110,7 +110,7 @@ MyBoot 框架的核心设计理念是"约定优于配置"，让您能够快速�
 ### 自动发现和注册
 
 ```python
-from myboot.core.decorators import service, get, cron
+from myboot.core.decorators import service, get, cron, component
 from myboot.core.application import get_service
 
 @service()
@@ -126,10 +126,14 @@ def get_user(user_id: int):
     user_service = get_service('user_service')
     return user_service.get_user(user_id)
 
-@cron('0 */5 * * * *')
-def cleanup_task():
-    """清理任务 - 自动注册定时任务"""
-    print("执行清理任务")
+@component()
+class ScheduledJobs:
+    """定时任务组件 - 使用 @component 装饰器定义定时任务"""
+    
+    @cron('0 */5 * * * *')
+    def cleanup_task(self):
+        """清理任务 - 自动注册定时任务"""
+        print("执行清理任务")
 ```
 
 ### 零配置启动
@@ -783,48 +787,79 @@ def get_users(
 
 ### 2. 定时任务
 
+**重要**：定时任务必须在 `@component` 装饰的类中定义，支持依赖注入。
+
 #### Cron 表达式任务
 
 ```python
-from myboot.core.decorators import cron, interval, once
+from myboot.core.decorators import component, cron, interval, once
 from myboot.core.config import get_config
 
-# 直接指定 enabled 参数
-@cron("0 0 * * * *", enabled=True)  # 每小时执行
-def hourly_task():
-    print("每小时任务")
-
-# 从配置文件读取 enabled 状态
-cleanup_enabled = get_config('jobs.cleanup_task.enabled', True)
-@cron("0 0 2 * * *", enabled=cleanup_enabled)  # 每天凌晨2点执行
-def daily_backup():
-    print("每日备份")
+@component()
+class ScheduledJobs:
+    """定时任务组件"""
+    
+    @cron("0 0 * * * *", enabled=True)  # 每小时执行
+    def hourly_task(self):
+        print("每小时任务")
+    
+    # 从配置文件读取 enabled 状态
+    @cron("0 0 2 * * *", enabled=get_config('jobs.cleanup_task.enabled', True))
+    def daily_backup(self):
+        """每天凌晨2点执行"""
+        print("每日备份")
 ```
 
 #### 间隔任务
 
 ```python
-# 直接启用
-@interval(seconds=30, enabled=True)  # 每30秒执行
-def heartbeat():
-    print("心跳检测")
-
-# 从配置文件读取
-monitor_enabled = get_config('jobs.monitor.enabled', True)
-@interval(minutes=5, enabled=monitor_enabled)  # 每5分钟执行
-def monitor():
-    print("系统监控")
+@component()
+class MonitorJobs:
+    """监控任务组件"""
+    
+    @interval(seconds=30, enabled=True)  # 每30秒执行
+    def heartbeat(self):
+        print("心跳检测")
+    
+    @interval(minutes=5, enabled=get_config('jobs.monitor.enabled', True))
+    def monitor(self):
+        """每5分钟执行"""
+        print("系统监控")
 ```
 
 #### 一次性任务
 
 ```python
-# 一次性任务 - 过期后不再执行
-@once("2024-12-31 23:59:59", enabled=True)
-def new_year_task():
-    print("新年任务")
+@component()
+class OneTimeJobs:
+    """一次性任务组件"""
+    
+    @once("2025-12-31 23:59:59", enabled=True)
+    def new_year_task(self):
+        """新年任务 - 过期后不再执行"""
+        print("新年任务")
+```
 
-# 如果任务时间已过期，将自动标记为过期，不再执行
+#### 带依赖注入的定时任务
+
+```python
+from myboot.core.decorators import component, service, cron
+
+@service()
+class DataService:
+    def sync_data(self):
+        print("同步数据...")
+
+@component()
+class DataSyncJobs:
+    """数据同步任务 - 自动注入 DataService"""
+    
+    def __init__(self, data_service: DataService):
+        self.data_service = data_service
+    
+    @cron("0 2 * * *")  # 每天凌晨2点
+    def sync_daily(self):
+        self.data_service.sync_data()
 ```
 
 ### 3. 配置管理
@@ -925,27 +960,31 @@ print(job_info)
 任务装饰器支持 `enabled` 参数，可以控制任务是否启用：
 
 ```python
-from myboot.core.decorators import cron, interval, once
+from myboot.core.decorators import component, cron, interval, once
 from myboot.core.config import get_config
 
-# 方式一：直接指定
-@cron("0 */1 * * * *", enabled=True)  # 启用
-def enabled_task():
-    print("启用状态")
+@component()
+class TaskControlDemo:
+    """任务控制示例"""
+    
+    # 方式一：直接指定
+    @cron("0 */1 * * * *", enabled=True)  # 启用
+    def enabled_task(self):
+        print("启用状态")
 
-@interval(minutes=2, enabled=False)  # 禁用
-def disabled_task():
-    print("禁用状态")
+    @interval(minutes=2, enabled=False)  # 禁用
+    def disabled_task(self):
+        print("禁用状态")
 
-# 方式二：从配置文件读取
-task_enabled = get_config('jobs.my_task.enabled', True)
-@once("2025-01-01 00:00:00", enabled=task_enabled)
-def configurable_task():
-    print("可配置任务")
+    # 方式二：从配置文件读取
+    @once("2025-01-01 00:00:00", enabled=get_config('jobs.my_task.enabled', True))
+    def configurable_task(self):
+        print("可配置任务")
 ```
 
 **注意**：
 
+- 定时任务必须在 `@component` 装饰的类中定义
 - 如果 `enabled` 为 `None`，默认启用
 - 一次性任务如果时间已过期，将自动标记为过期不再执行
 - 已执行的一次性任务不会重复执行
@@ -1200,7 +1239,7 @@ my-app/
 - **app/api/**: API 路由层，存放所有路由定义
 - **app/service/**: 业务逻辑层，存放业务服务类
 - **app/model/**: 数据模型层，存放 Pydantic 模型等
-- **app/jobs/**: 定时任务，存放使用 `@cron`、`@interval` 等装饰器的任务
+- **app/jobs/**: 定时任务组件，存放使用 `@component` 装饰的类，类中方法可使用 `@cron`、`@interval` 等装饰器
 - **app/client/**: 客户端层，存放第三方服务客户端（如 Redis、HTTP 客户端等）
 - **conf/**: 配置文件目录，存放 YAML 配置文件
 - **tests/**: 测试代码目录

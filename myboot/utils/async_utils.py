@@ -115,7 +115,7 @@ def get_async_executor(max_workers: int = 4, executor_type: str = 'thread') -> A
     return _global_executor
 
 
-def asyn_run(func: Callable, *args, **kwargs) -> asyncio.Task:
+def async_run(func: Callable, *args, **kwargs) -> asyncio.Task:
     """
     快速启动后台任务的便捷函数
     

@@ -16,7 +16,7 @@ from myboot.core.decorators import (
     get, post, put, delete,
     cron, interval, once,
     service, client, middleware,
-    rest_controller
+    rest_controller, component
 )
 from myboot.jobs.scheduled_job import ScheduledJob
 from myboot.core.scheduler import get_scheduler
@@ -247,26 +247,31 @@ def delete_user(user_id: int):
         return {"error": "用户不存在"}
 
 
-# ==================== 定时任务 ====================
-
-@cron('0 */1 * * * *', enabled=True)  # 每分钟执行
-def heartbeat():
-    """心跳任务 - 自动注册"""
-    print("💓 心跳检测 - 系统运行正常")
+# ==================== 定时任务组件 ====================
+# 注意：定时任务必须在 @component 装饰的类中定义，支持依赖注入
 
 
-# 每10分钟执行
-# 从配置文件读取 enabled 状态
-@interval(minutes=10, enabled=get_config('jobs.cleanup_task.enabled', True))
-def cleanup_task():
-    """清理任务 - 自动注册"""
-    print("🧹 执行清理任务")
-
-
-@once('2025-11-5 17:41:00')
-def new_year_task():
-    """新年任务 - 自动注册（已禁用）"""
-    print("🎉 新年任务执行")
+@component()
+class ScheduledJobs:
+    """定时任务组件 - 使用 @component 装饰器，支持依赖注入"""
+    
+    def __init__(self):
+        print("✅ ScheduledJobs 已初始化")
+    
+    @cron('0 */1 * * * *', enabled=True)  # 每分钟执行
+    def heartbeat(self):
+        """心跳任务"""
+        print("💓 心跳检测 - 系统运行正常")
+    
+    @interval(minutes=10, enabled=get_config('jobs.cleanup_task.enabled', True))
+    def cleanup_task(self):
+        """清理任务 - 从配置文件读取 enabled 状态"""
+        print("🧹 执行清理任务")
+    
+    @once('2025-12-31 23:59:59')
+    def new_year_task(self):
+        """新年任务"""
+        print("🎉 新年任务执行")
 
 
 # ==================== REST 控制器 ====================
@@ -434,10 +439,10 @@ if __name__ == "__main__":
     print("  • PUT  /api/products/{id}   - 更新产品")
     print("  • DELETE /api/products/{id} - 删除产品")
     print()
-    print("⏰ 定时任务:")
+    print("⏰ 定时任务（通过 @component 组件定义）:")
     print("  • 心跳检测 (每分钟)")
-    print("  • 清理任务 (每2分钟)")
-    print("  • 新年任务 (2024-12-31 23:59:59)")
+    print("  • 清理任务 (每10分钟)")
+    print("  • 新年任务 (2025-12-31 23:59:59)")
     print()
     print("=" * 60)
 

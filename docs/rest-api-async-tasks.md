@@ -12,13 +12,13 @@
 
 ## 快速启动后台任务
 
-使用 `asyn_run` 函数可以快速在后台启动异步任务，适用于不需要跟踪任务状态的场景。
+使用 `async_run` 函数可以快速在后台启动异步任务，适用于不需要跟踪任务状态的场景。
 
 ### 基本用法
 
 ```python
 from myboot.core.decorators import post, rest_controller
-from myboot.utils.async_utils import asyn_run
+from myboot.utils.async_utils import async_run
 import time
 
 def process_data(data: dict):
@@ -36,7 +36,7 @@ class TaskController:
     def create_process_task(self, data: dict):
         """创建数据处理任务"""
         # 立即返回，任务在后台执行
-        task = asyn_run(process_data, data, task_name="数据处理任务")
+        task = async_run(process_data, data, task_name="数据处理任务")
 
         return {
             "message": "任务已创建，正在后台处理",
@@ -48,7 +48,7 @@ class TaskController:
 ### 带参数的任务
 
 ```python
-from myboot.utils.async_utils import asyn_run
+from myboot.utils.async_utils import async_run
 
 def send_email(to: str, subject: str, content: str):
     """发送邮件任务"""
@@ -61,7 +61,7 @@ def send_email(to: str, subject: str, content: str):
 def send_email_async(to: str, subject: str, content: str):
     """异步发送邮件"""
     # 启动后台任务
-    asyn_run(send_email, to, subject, content, task_name=f"发送邮件给{to}")
+    async_run(send_email, to, subject, content, task_name=f"发送邮件给{to}")
 
     return {
         "message": "邮件发送任务已创建",
@@ -316,7 +316,7 @@ class JobStatusController:
 from myboot.core.decorators import post, get, rest_controller
 from myboot.jobs.scheduled_job import ScheduledJob
 from myboot.core.scheduler import get_scheduler
-from myboot.utils.async_utils import asyn_run
+from myboot.utils.async_utils import async_run
 import time
 import uuid
 
@@ -433,9 +433,9 @@ class FileController:
 
 ### 1. 选择合适的异步方式
 
-- **简单任务，无需跟踪**：使用 `asyn_run`
+- **简单任务，无需跟踪**：使用 `async_run`
 - **需要跟踪状态**：使用 `ScheduledJob`（继承并实现 `run` 方法）
-- **需要定时执行**：使用 `ScheduledJob` + `Scheduler.add_scheduled_job()`
+- **需要定时执行**：使用 `@component` + `@cron`/`@interval`/`@once` 装饰器
 
 ### 2. 任务超时设置
 

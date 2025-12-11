@@ -1,7 +1,7 @@
 """
 统一容器模块
 
-提供统一的容器接口，支持从 container、services、clients 中获取实例
+提供统一的容器接口，支持从 container、components、services、clients 中获取实例
 """
 
 from typing import Any, Dict, List, Type, TYPE_CHECKING
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 class Container:
-    """统一容器类，支持从 container、services、clients 中获取实例"""
+    """统一容器类，支持从 container、components、services、clients 中获取实例"""
     
     def __init__(self, app: 'Application'):
         """
@@ -37,7 +37,7 @@ class Container:
     
     def get(self, name: str, default: Any = None) -> Any:
         """
-        从容器中获取实例（优先从 container，然后从 services，最后从 clients）
+        从容器中获取实例（优先从 container，然后从 components、services，最后从 clients）
         
         Args:
             name: 实例名称
@@ -49,6 +49,10 @@ class Container:
         # 优先从 container 中获取
         if name in self._storage:
             return self._storage[name]
+        
+        # 然后从 components 中获取
+        if name in self._app.components:
+            return self._app.components[name]
         
         # 然后从 services 中获取
         if name in self._app.services:
@@ -75,12 +79,12 @@ class Container:
         """
         instance = self.get(name)
         if instance is None:
-            raise KeyError(f"容器中不存在实例: {name} (已检查 container、services、clients)")
+            raise KeyError(f"容器中不存在实例: {name} (已检查 container、components、services、clients)")
         return instance
     
     def has(self, name: str) -> bool:
         """
-        检查容器中是否存在指定名称的实例（检查 container、services、clients）
+        检查容器中是否存在指定名称的实例（检查 container、components、services、clients）
         
         Args:
             name: 实例名称
@@ -89,12 +93,13 @@ class Container:
             是否存在
         """
         return (name in self._storage or 
+                name in self._app.components or
                 name in self._app.services or 
                 name in self._app.clients)
     
     def remove(self, name: str) -> bool:
         """
-        从容器中移除实例（按顺序从 container、services、clients 中移除）
+        从容器中移除实例（按顺序从 container、components、services、clients 中移除）
         
         Args:
             name: 实例名称
@@ -106,6 +111,10 @@ class Container:
         if name in self._storage:
             del self._storage[name]
             self._app.logger.debug(f"已从容器移除: {name}")
+            removed = True
+        if name in self._app.components:
+            del self._app.components[name]
+            self._app.logger.debug(f"已从组件移除: {name}")
             removed = True
         if name in self._app.services:
             del self._app.services[name]
@@ -119,7 +128,7 @@ class Container:
     
     def get_by_type(self, instance_type: Type) -> List[Any]:
         """
-        根据类型获取容器中所有匹配的实例（从 container、services、clients 中查找）
+        根据类型获取容器中所有匹配的实例（从 container、components、services、clients 中查找）
         
         Args:
             instance_type: 实例类型
@@ -131,6 +140,9 @@ class Container:
         # 从 container 中查找
         instances.extend([instance for instance in self._storage.values() 
                           if isinstance(instance, instance_type)])
+        # 从 components 中查找
+        instances.extend([instance for instance in self._app.components.values() 
+                          if isinstance(instance, instance_type)])
         # 从 services 中查找
         instances.extend([instance for instance in self._app.services.values() 
                           if isinstance(instance, instance_type)])
@@ -141,20 +153,22 @@ class Container:
     
     def list_all(self) -> Dict[str, Any]:
         """
-        列出容器中所有实例（包括 container、services、clients）
+        列出容器中所有实例（包括 container、components、services、clients）
         
         Returns:
             所有实例的字典（名称 -> 实例）
         """
         all_instances = {}
         all_instances.update(self._storage)
+        all_instances.update(self._app.components)
         all_instances.update(self._app.services)
         all_instances.update(self._app.clients)
         return all_instances
     
     def clear(self) -> None:
-        """清空容器（清空 container、services、clients）"""
+        """清空容器（清空 container、components、services、clients）"""
         self._storage.clear()
+        self._app.components.clear()
         self._app.services.clear()
         self._app.clients.clear()
         self._app.logger.debug("容器已清空")

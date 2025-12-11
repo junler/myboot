@@ -83,6 +83,9 @@ class Application:
         # 客户端注册表
         self.clients: Dict[str, Any] = {}
 
+        # 组件注册表
+        self.components: Dict[str, Any] = {}
+
         # 统一容器接口（支持从 container、services、clients 中获取实例）
         self.container = Container(self)
 
@@ -164,6 +167,13 @@ class Application:
         """检查是否有客户端"""
         return name in self.clients
 
+    def get_component(self, name: str) -> Any:
+        """获取组件"""
+        return self.components.get(name)
+
+    def has_component(self, name: str) -> bool:
+        """检查是否有组件"""
+        return name in self.components
 
     def route(
             self,
