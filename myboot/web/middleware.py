@@ -214,8 +214,8 @@ class ResponseFormatterMiddleware(BaseHTTPMiddleware):
         if not isinstance(content, dict):
             return False
         
-        # 检查是否包含统一格式的字段
-        required_fields = {"success", "code", "message"}
+        # 检查是否包含统一格式的必须字段（message 和 data 可选）
+        required_fields = {"success", "code"}
         return all(field in content for field in required_fields)
     
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
