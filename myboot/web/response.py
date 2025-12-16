@@ -19,10 +19,12 @@ class ApiResponse(BaseModel):
     
     success: bool = Field(description="是否成功")
     code: int = Field(description="HTTP 状态码")
-    message: str = Field(description="响应消息")
+    message: Optional[str] = Field(default=None, description="响应消息")
     data: Optional[Any] = Field(default=None, description="响应数据")
     
     class Config:
+        # 序列化时排除值为 None 的字段
+        exclude_none = True
         json_encoders = {
             # 可以在这里添加自定义编码器
         }
@@ -37,7 +39,7 @@ class ResponseWrapper:
     @staticmethod
     def success(
         data: Any = None,
-        message: str = "操作成功",
+        message: Optional[str] = None,
         code: int = 200
     ) -> Dict[str, Any]:
         """
@@ -51,16 +53,19 @@ class ResponseWrapper:
         Returns:
             统一格式的响应字典
         """
-        return {
+        result = {
             "success": True,
             "code": code,
-            "message": message,
-            "data": data
         }
+        if message is not None:
+            result["message"] = message
+        if data is not None:
+            result["data"] = data
+        return result
     
     @staticmethod
     def error(
-        message: str = "操作失败",
+        message: Optional[str] = None,
         code: int = 500,
         data: Optional[Any] = None
     ) -> Dict[str, Any]:
@@ -75,17 +80,20 @@ class ResponseWrapper:
         Returns:
             统一格式的响应字典
         """
-        return {
+        result = {
             "success": False,
             "code": code,
-            "message": message,
-            "data": data if data is not None else {}
         }
+        if message is not None:
+            result["message"] = message
+        if data is not None:
+            result["data"] = data
+        return result
     
     @staticmethod
     def created(
         data: Any = None,
-        message: str = "创建成功"
+        message: Optional[str] = None
     ) -> Dict[str, Any]:
         """创建成功响应（201）"""
         return ResponseWrapper.success(data=data, message=message, code=201)
@@ -93,14 +101,14 @@ class ResponseWrapper:
     @staticmethod
     def updated(
         data: Any = None,
-        message: str = "更新成功"
+        message: Optional[str] = None
     ) -> Dict[str, Any]:
         """更新成功响应（200）"""
         return ResponseWrapper.success(data=data, message=message, code=200)
     
     @staticmethod
     def deleted(
-        message: str = "删除成功"
+        message: Optional[str] = None
     ) -> Dict[str, Any]:
         """删除成功响应（200）"""
         return ResponseWrapper.success(data=None, message=message, code=200)
@@ -108,7 +116,7 @@ class ResponseWrapper:
     @staticmethod
     def no_content() -> Dict[str, Any]:
         """无内容响应（204）"""
-        return ResponseWrapper.success(data=None, message="", code=204)
+        return ResponseWrapper.success(data=None, message=None, code=204)
     
     @staticmethod
     def pagination(
@@ -116,7 +124,7 @@ class ResponseWrapper:
         total: int,
         page: int,
         size: int,
-        message: str = "查询成功"
+        message: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         创建分页响应
@@ -152,17 +160,14 @@ class ResponseWrapper:
         
         Args:
             data: 要包装的数据
-            message: 响应消息（如果为 None，会根据数据类型自动生成）
+            message: 响应消息（如果为 None，返回中不包含该字段）
             code: HTTP 状态码
         
         Returns:
             统一格式的响应字典
         """
-        if message is None:
-            message = "操作成功"
-        
         # 如果已经是统一格式，直接返回
-        if isinstance(data, dict) and all(key in data for key in ["success", "code", "message"]):
+        if isinstance(data, dict) and all(key in data for key in ["success", "code"]):
             return data
         
         return ResponseWrapper.success(data=data, message=message, code=code)
