@@ -41,7 +41,11 @@ def _resolve_app_from_path(app_path: str):
         module_path, app_expr = app_path, "app"
     
     # 导入模块
-    module = importlib.import_module(module_path)
+    # 如果请求的是 main 模块且 __main__ 已存在，直接使用 __main__
+    if module_path == "main" and "__main__" in sys.modules:
+        module = sys.modules["__main__"]
+    else:
+        module = importlib.import_module(module_path)
     
     # 解析表达式，支持链式调用如 "app.get_fastapi_app()"
     # 使用简单的解析器处理 attr 和 method() 调用
